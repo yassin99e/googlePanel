@@ -76,31 +76,53 @@ def setup_driver(headless=True):
 # ---------------------------------------------------------
 # Logique d'extraction (Version Debug & Cookies)
 # ---------------------------------------------------------
+def prime_cookies(driver):
+    """Visite la page d'accueil Google pour obtenir des cookies de session normaux."""
+    try:
+        logger.info("🍪 Amorçage de la session (visite de google.com)...")
+        driver.get("https://www.google.com")
+        time.sleep(random.uniform(2.0, 4.0))
+        # Accepter les cookies si présents
+        try:
+            boutons = driver.find_elements(By.XPATH, "//button[.//div[contains(text(), 'Tout accepter') or contains(text(), 'Accept all')]]")
+            if boutons:
+                boutons[0].click()
+                time.sleep(1.5)
+        except:
+            pass
+    except Exception as e:
+        logger.warning(f"Impossible d'amorcer les cookies : {e}")
+
 def scrape_google_data(driver, nom, ville):
-    query = urllib.parse.quote(f"{nom} {ville} Maroc")
-    url_search = f"https://www.google.com/search?q={query}&hl=fr"
+    query_text = f"{nom} {ville} Maroc"
+    query_url = urllib.parse.quote(query_text)
+    url_search = f"https://www.google.com/search?q={query_url}&hl=fr"
     
     try:
-        driver.get(url_search)
-        # Jitter initial : on attend que la page "respire"
-        time.sleep(random.uniform(3.5, 6.0))
+        # TECHNIQUE : On ne va pas toujours directement sur l'URL de recherche
+        # De temps en temps, on passe par la page d'accueil et on "tape" la recherche
+        if random.random() > 0.7:
+            driver.get("https://www.google.com")
+            time.sleep(random.uniform(1.5, 3.0))
+            search_box = driver.find_element(By.NAME, "q")
+            for char in query_text:
+                search_box.send_keys(char)
+                time.sleep(random.uniform(0.05, 0.2))
+            search_box.submit()
+        else:
+            driver.get(url_search)
+            
+        time.sleep(random.uniform(4.0, 7.0))
         
-        # Détection de Captcha ou blocage
         if "sorry/index" in driver.current_url or "recaptcha" in driver.page_source.lower():
             return "BLOCKED"
             
-        # NOUVEAU : Acceptation des cookies avec probabilité (comme un humain)
-        if random.random() > 0.1: # 90% de chances de cliquer
-            try:
-                boutons = driver.find_elements(By.XPATH, "//button[.//div[contains(text(), 'Tout accepter') or contains(text(), 'Accept all')]]")
-                if boutons:
-                    boutons[0].click()
-                    time.sleep(random.uniform(1.0, 2.5)) 
-            except:
-                pass 
+        # NOUVEAU : On simule un petit scroll pour faire "humain"
+        driver.execute_script(f"window.scrollTo(0, {random.randint(100, 500)})")
+        time.sleep(random.uniform(1.0, 2.0))
             
     except Exception as e:
-        logger.error(f"  -> Erreur de chargement : {e}")
+        logger.error(f"  -> Erreur lors de la navigation : {e}")
         return None
 
     soup = BeautifulSoup(driver.page_source, 'html.parser')
@@ -183,12 +205,22 @@ def main():
     parser.add_argument("--input", "-i", type=str, required=True, help="Fichier CSV d'entrée (ex: part1.csv)")
     parser.add_argument("--output", "-o", type=str, required=True, help="Fichier CSV de sortie (ex: output_part1.csv)")
     parser.add_argument("--gui", action="store_true", help="Activer l'interface (Désactivé par défaut sur Serveur)")
+    parser.add_argument("--proxy", "-p", type=str, default=None, help="Proxy URL (ex: http://user:pass@host:port)")
     args = parser.parse_args()
 
     logger.info(f"🚀 Lancement (Entrée: {args.input} | Sortie: {args.output})")
     
     try:
+        # Ajout du support de proxy s'il est fourni
+        options = uc.ChromeOptions()
+        if args.proxy:
+            options.add_argument(f'--proxy-server={args.proxy}')
+            logger.info(f"🌐 Utilisation du proxy : {args.proxy}")
+            
         driver = setup_driver(headless=not args.gui)
+        
+        # Amorsage des cookies
+        prime_cookies(driver)
     except Exception as e:
         logger.error(f"Fermeture prématurée : {e}")
         return
