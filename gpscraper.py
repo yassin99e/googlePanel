@@ -62,7 +62,8 @@ def setup_driver(headless=True):
     options.add_argument(f"user-agent={random.choice(user_agents)}")
 
     try:
-        driver = uc.Chrome(options=options, headless=headless, version_main=119)
+        # On laisse uc auto-détecter la version pour correspondre à Chrome 146 sur le serveur
+        driver = uc.Chrome(options=options, headless=headless)
         driver.implicitly_wait(5)
         return driver
     except Exception as e:
