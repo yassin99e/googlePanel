@@ -5,9 +5,26 @@ import urllib.parse
 import os
 import traceback
 import pandas as pd
+import argparse
+import logging
 from difflib import SequenceMatcher
 from bs4 import BeautifulSoup
 import undetected_chromedriver as uc
+from selenium.webdriver.common.by import By
+
+# ---------------------------------------------------------
+# Configuration du Logging
+# ---------------------------------------------------------
+# Sur Ubuntu Server, nous écrivons dans un fichier et dans la console
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(message)s',
+    handlers=[
+        logging.FileHandler("scraper_debug.log"),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------
 # Fonction de similarité
@@ -21,16 +38,36 @@ def is_similar(a, b, threshold=0.55):
 # ---------------------------------------------------------
 # Configuration du Navigateur Anti-Bot
 # ---------------------------------------------------------
-def setup_driver():
+def setup_driver(headless=True):
     options = uc.ChromeOptions()
-    # ATTENTION : Ne jamais utiliser options.add_argument("--headless") avec UC.
-    options.add_argument("--disable-gpu")
+    if headless:
+        options.add_argument("--headless")
+        options.add_argument("--disable-gpu")
+        options.add_argument("--no-sandbox")
+        options.add_argument("--disable-dev-shm-usage")
+        options.add_argument("--disable-blink-features=AutomationControlled")
+    
+    # Randomisation légère de la taille d'écran pour paraître humain
+    width = random.randint(1024, 1920)
+    height = random.randint(768, 1080)
+    options.add_argument(f"--window-size={width},{height}")
     options.add_argument("--lang=fr-FR")
     
-    # CORRECTION : Le mode headless s'active ici directement, avec la version forcée.
-    driver = uc.Chrome(options=options, headless=False, version_main=145)
-    driver.implicitly_wait(5)
-    return driver
+    # User-Agents variés (peuvent être enrichis)
+    user_agents = [
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36"
+    ]
+    options.add_argument(f"user-agent={random.choice(user_agents)}")
+
+    try:
+        driver = uc.Chrome(options=options, headless=headless, version_main=119)
+        driver.implicitly_wait(5)
+        return driver
+    except Exception as e:
+        logger.error(f"Erreur lors du lancement du navigateur : {e}")
+        raise
 
 # ---------------------------------------------------------
 # Logique d'extraction
@@ -44,27 +81,25 @@ def scrape_google_data(driver, nom, ville):
     
     try:
         driver.get(url_search)
-        time.sleep(random.uniform(2.0, 3.5))
+        # Jitter initial : on attend que la page "respire"
+        time.sleep(random.uniform(3.5, 6.0))
+        
+        # Détection de Captcha ou blocage
         if "sorry/index" in driver.current_url or "recaptcha" in driver.page_source.lower():
-            print("\n🚨 CAPTCHA DÉTECTÉ ! 🚨")
-            print("Google a temporairement bloqué l'accès.")
-            print("1. Va sur la fenêtre Chrome ouverte par le script.")
-            print("2. Résous le Captcha manuellement.")
-            print("3. Attends que les résultats de recherche s'affichent.")
-            input("👉 4. UNE FOIS LES RÉSULTATS AFFICHÉS, APPUIE SUR [ENTRÉE] ICI POUR CONTINUER...")
-            print("Reprise du scraping...")
-            time.sleep(2)
-        # NOUVEAU : Tenter de cliquer sur le bouton "Tout accepter" pour les cookies
-        try:
-            boutons = driver.find_elements(By.XPATH, "//button[.//div[contains(text(), 'Tout accepter') or contains(text(), 'Accept all')]]")
-            if boutons:
-                boutons[0].click()
-                time.sleep(1.5) # Attendre que la vraie page de recherche charge
-        except:
-            pass # Pas de page de cookies, on continue
+            return "BLOCKED"
+            
+        # NOUVEAU : Acceptation des cookies avec probabilité (comme un humain)
+        if random.random() > 0.1: # 90% de chances de cliquer
+            try:
+                boutons = driver.find_elements(By.XPATH, "//button[.//div[contains(text(), 'Tout accepter') or contains(text(), 'Accept all')]]")
+                if boutons:
+                    boutons[0].click()
+                    time.sleep(random.uniform(1.0, 2.5)) 
+            except:
+                pass 
             
     except Exception as e:
-        print(f"  -> Erreur de chargement de la page : {e}")
+        logger.error(f"  -> Erreur de chargement : {e}")
         return None
 
     soup = BeautifulSoup(driver.page_source, 'html.parser')
@@ -126,16 +161,16 @@ def scrape_google_data(driver, nom, ville):
             domain_name = domain.split('.')[0] 
             
             # NOUVEAU : Affichage de ce que le script voit réellement
-            print(f"    [Debug] 1er lien trouvé : {domain_name} | Titre : {title_text}")
+            logger.debug(f"    [Détails] 1er lien : {domain_name} | {title_text}")
             
-            # J'ai abaissé le seuil de similarité à 0.45 pour être plus permissif
+            # Similarité à 0.45
             if is_similar(nom, title_text, 0.45) or is_similar(nom, domain_name, 0.45):
                 exclude_list = ['linkedin', 'facebook', 'instagram', 'telecontact', 'kerix', 'pagesjaunes', 'marocannuaire', 'kompass']
                 if not any(ex in domain.lower() for ex in exclude_list):
                     data["Site Web"] = url
                     data["Source Site Web"] = "1er lien similaire"
             else:
-                print("    [Debug] Lien ignoré : Nom trop différent de la recherche.")
+                logger.debug("    [Détails] Lien rejeté : ressemblance insuffisante.")
                     
     return data
 
@@ -143,78 +178,134 @@ def scrape_google_data(driver, nom, ville):
 # Exécution Principale
 # ---------------------------------------------------------
 def main():
-    print("Démarrage du navigateur anti-bot...")
+    parser = argparse.ArgumentParser(description="Google Maps Scraper for AWS EC2 (Ubuntu Server)")
+    parser.add_argument("--input", "-i", type=str, required=True, help="Fichier CSV d'entrée (ex: part1.csv)")
+    parser.add_argument("--output", "-o", type=str, required=True, help="Fichier CSV de sortie (ex: output_part1.csv)")
+    parser.add_argument("--gui", action="store_true", help="Activer l'interface (Désactivé par défaut sur Serveur)")
+    args = parser.parse_args()
+
+    logger.info(f"🚀 Lancement (Entrée: {args.input} | Sortie: {args.output})")
+    
     try:
-        driver = setup_driver()
+        driver = setup_driver(headless=not args.gui)
     except Exception as e:
-        print(f"Erreur lors du lancement du navigateur : {e}")
-        traceback.print_exc()
+        logger.error(f"Fermeture prématurée : {e}")
         return
 
-    output_file = 'output_entreprises.csv'
     fieldnames = ["Nom de recherche", "Ville", "Nom trouvé", "Secteur d'activité", "Adresse", "Téléphone", "Site Web", "Source Site Web"]
     
-    # NOUVEAU : Lecture des entreprises déjà traitées pour la reprise automatique
-    lignes_deja_traitees = set()
-    if os.path.exists(output_file):
-        try:
-            with open(output_file, mode='r', encoding='utf-8-sig') as f:
-                reader = csv.DictReader(f)
-                for row in reader:
-                    lignes_deja_traitees.add(row.get("Nom de recherche", "").strip())
-            print(f"🔄 Reprise activée : {len(lignes_deja_traitees)} entreprises déjà sauvegardées ignorées.")
-        except Exception:
-            pass
-    else:
-        with open(output_file, mode='w', encoding='utf-8-sig', newline='') as f:
-            writer = csv.DictWriter(f, fieldnames=fieldnames)
-            writer.writeheader()
-
-    # Lecture robuste du CSV avec Pandas
+    # Chargement du fichier CSV d'entrée
     try:
-        df = pd.read_csv('charika_ville.csv', sep=None, engine='python', encoding='utf-8-sig')
+        df = pd.read_csv(args.input, sep=None, engine='python', encoding='utf-8-sig')
         df.columns = df.columns.str.strip().str.lower()
     except Exception as e:
-        print(f"Erreur impossible de lire df_nom_ville.csv : {e}")
+        logger.error(f"Impossible de lire {args.input} : {e}")
         driver.quit()
         return
 
     if 'nom' not in df.columns or 'ville' not in df.columns:
-        print("❌ ERREUR : Colonnes 'nom' et 'ville' introuvables.")
+        logger.error("❌ ERREUR : Colonnes 'nom' et 'ville' introuvables.")
         driver.quit()
         return
 
+    # Gestion de la reprise automatique (Basée sur le couple Nom + Ville)
+    lignes_deja_traitees = set()
+    if os.path.exists(args.output):
+        try:
+            with open(args.output, mode='r', encoding='utf-8-sig') as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    n = str(row.get("Nom de recherche", "")).strip()
+                    v = str(row.get("Ville", "")).strip()
+                    lignes_deja_traitees.add(f"{n}|{v}")
+            logger.info(f"🔄 Reprise activée : {len(lignes_deja_traitees)} entreprises déjà traitées dans '{args.output}'.")
+        except Exception as e:
+            logger.warning(f"Impossible de lire le fichier de reprise : {e}")
+            pass
+    else:
+        with open(args.output, mode='w', encoding='utf-8-sig', newline='') as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+
+    # Configuration des seuils
+    RESTART_EVERY = 30  # Redémarrer Chrome toutes les 30 requêtes pour éviter d'être pisté
+    counter = 0
+
     try:
+        total = len(df)
         for index, row in df.iterrows():
             nom = str(row.get('nom', '')).strip()
             ville = str(row.get('ville', '')).strip()
             
-            # Sécurité : Si vide ou déjà traité, on saute
-            if not nom or nom.lower() == 'nan' or nom in lignes_deja_traitees:
+            cle_unique = f"{nom}|{ville}"
+            
+            if not nom or nom.lower() == 'nan' or cle_unique in lignes_deja_traitees:
                 continue
                 
-            print(f"Recherche ({index + 1}/{len(df)}) : {nom} à {ville}...")
+            # Gestion de la rotation de session
+            if counter >= RESTART_EVERY:
+                logger.info("🔄 Rotation de session : Redémarrage du navigateur...")
+                driver.quit()
+                time.sleep(random.randint(15, 30))
+                driver = setup_driver(headless=not args.gui)
+                counter = 0
+
+            logger.info(f"[{index + 1}/{total}] Scraping : {nom} ({ville})")
             
-            result = scrape_google_data(driver, nom, ville)
+            # Logique de retry sophistiquée
+            max_retries = 3
+            result = None
             
-            # Sauvegarde en temps réel
-            if result:
-                with open(output_file, mode='a', encoding='utf-8-sig', newline='') as f:
+            for attempt in range(max_retries):
+                result = scrape_google_data(driver, nom, ville)
+                
+                if result == "BLOCKED":
+                    # Si bloqué, on fait une grosse pause et on re-essaie
+                    wait_sec = random.randint(300, 600) * (attempt + 1)
+                    logger.warning(f"🚨 Bloqué (Tentative {attempt+1}/{max_retries}). Pause de {wait_sec//60} min...")
+                    time.sleep(wait_sec)
+                    # On change d'identité si possible lors du retry (ici reboot browser)
+                    driver.quit()
+                    driver = setup_driver(headless=not args.gui)
+                    continue 
+                elif result is None:
+                    # Erreur technique, petit wait
+                    time.sleep(10)
+                    continue
+                else:
+                    # Succès
+                    break
+            
+            if result and result != "BLOCKED":
+                with open(args.output, mode='a', encoding='utf-8-sig', newline='') as f:
                     writer = csv.DictWriter(f, fieldnames=fieldnames)
                     writer.writerow(result)
+                counter += 1
+            elif result == "BLOCKED":
+                logger.error(f"❌ Échec définitif pour {nom} suite à un blocage multiple.")
+            
+            # Jitter entre chaque entreprise
+            # On simule un temps de lecture/analyse humaine
+            time.sleep(random.uniform(5, 12))
+            
+            # De temps en temps, on fait une pause "café" plus longue
+            if counter > 0 and counter % 10 == 0:
+                coffee_break = random.randint(60, 180)
+                logger.info(f"☕ Pause café de {coffee_break}s...")
+                time.sleep(coffee_break)
                     
     except KeyboardInterrupt:
-        print("\n⏹ Scraping interrompu manuellement.")
+        logger.info("\n⏹ Arrêt manuel par l'utilisateur.")
     except Exception as e:
-        print(f"\n❌ Une erreur inattendue est survenue : {e}")
-        traceback.print_exc()  # Affiche l'erreur exacte dans la console
+        logger.error(f"\n❌ Erreur critique : {e}")
+        traceback.print_exc()
     finally:
-        print(f"\nFermeture du navigateur...")
+        logger.info("Fermeture du navigateur...")
         try:
             driver.quit()
-        except Exception:
+        except:
             pass
-        print(f"Scraping terminé. Résultats sauvegardés dans '{output_file}'.")
+        logger.info(f"Terminé. Résultats dans '{args.output}'.")
 
 if __name__ == "__main__":
     main()
